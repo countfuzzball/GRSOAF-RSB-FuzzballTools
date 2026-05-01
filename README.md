@@ -55,9 +55,8 @@ This repository contains Python utilities for working with Red Storm Entertainme
 The main goal is to support modding workflows, especially:
 
 - porting textures and maps between Ghost Recon and The Sum of All Fears
-- fixing incompatible or broken textures
 - documenting unknown RSB fields through practical testing
-- creating scriptable alternatives to old closed-source tools
+- creating scriptable alternatives to old closed-source tools like the RSB Photoshop plugin and the standalone RSBEditor and RSBTool tools.
 
 ---
 
@@ -85,25 +84,24 @@ The project currently focuses mainly on practical compatibility with:
 - texture dimension parsing
 - format detection for common payload types
 - PNG extraction
-- PNG to RSB rebuilding
+- PNG to RSB rebuilding (extremely alpha feature at this stage)
 - RSB v8 writing
 - partial RSB v9 writing / compatibility
 - ARGB8888 handling
 - ARGB1555 handling
 - ARGB4444 handling
 - RGB565 handling
-- basic mipmap field support
+- Mipmap field support
 - surface type parsing/writing
 - damage texture reference parsing/writing
-- basic animation record support
+- Animation record support
+- scrolling animation fields
+- tiled / subsampling options
 - optional generation of multiple extraction candidates where byte order is ambiguous
 
 ### Experimental / Incomplete
 
-- full RSB v9 support
-- complete animation block support
-- scrolling animation fields
-- tiled / subsampling options
+- full RSB v9 support (No colour palettes or DXT compressed textures right now)
 - compression-related flags
 - distortion-map metadata
 - robust automatic channel-order detection
@@ -119,11 +117,7 @@ RSB files are quirky.
 Known pain points include:
 
 - channel ordering can vary or be ambiguous
-- some files appear to require shifted payload offsets
-- RSBEditor-generated files may differ slightly from shipped game assets
-- animation records can interact awkwardly with mipmap fields
 - some metadata fields are still guessed rather than fully understood
-- case-sensitive filenames can cause trouble when preparing assets on Linux for Windows games
 
 Always test rebuilt RSB files in the actual target game.
 

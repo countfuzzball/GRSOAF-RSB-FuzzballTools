@@ -1,5 +1,15 @@
 # RSB Tools (Ghost Recon / Sum of All Fears)
 
+
+<img width="1920" height="1053" alt="image" src="https://github.com/user-attachments/assets/a6ac9fe5-ee2e-4eae-8a21-b065b3c1ff4f" />
+
+<img width="1891" height="205" alt="image" src="https://github.com/user-attachments/assets/e9cb40de-4899-44de-a6bd-d210db6faf04" />
+
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/8df7fa29-794c-4c49-89e6-f27f35227e12" />
+
+
+
+
 LLM-assisted Python scripts for inspecting, unpacking, and repacking `.rsb` texture files used by **Tom Clancy's Ghost Recon (2001)** and **The Sum of All Fears (2002)**, with experimental support for engine-specific RSB metadata.
 
 This project is intended for practical reverse-engineering and modding workflows rather than as a complete or authoritative specification of the RSB format.

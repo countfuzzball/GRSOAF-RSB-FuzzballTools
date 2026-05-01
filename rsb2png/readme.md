@@ -102,17 +102,16 @@ You can also specify the output folder:
 
 ARGB8888 RSB files are the trickiest format currently handled by the script.
 
-Although the script defaults to `bgra` byte order, for most practical modding and extraction work, especially with the troublesome Ghost Recon / Sum of All Fears textures tested so far, the variant most people will probably want is:
+Internally, the 32-bit texture payloads are stored in BGRA by default, but we need to read it out as ARGB. This is the default way now.
 
-    --argb8888-order argb --payload-shift 0
+The byte order can be changed with --argb8888-order <bgra/rgba, etc>
 
-In other words:
+e.g:
+python3 rsb_to_pngsmartdetect_versioned_grouped.py texture.rsb --argb8888-order argb --payload-shift 0
 
-    python3 rsb_to_pngsmartdetect_versioned_grouped.py texture.rsb --argb8888-order argb --payload-shift 0
 
-The default `bgra` output exists because many 32-bit texture payloads appear to store their channels in BGRA-like order internally. However, in practice, `ARGB` at offset `0` is likely the correct or most useful interpretation for the vast majority of normal use cases.
+Additionally, offsets can be specified with --payload-shift 0-3, which will shift where the script starts reading the image data by 0 to 3 bytes.
 
-If the output looks strangely blue, washed out, transparent, scrambled, or channel-swapped, try the ARGB offset 0 option first.
 
 ## Brute-force ARGB8888 variants
 

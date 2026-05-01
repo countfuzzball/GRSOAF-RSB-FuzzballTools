@@ -201,7 +201,7 @@ def unpack_argb4444(payload: bytes, width: int, height: int) -> bytes:
     return bytes(out)
 
 
-def unpack_argb8888(payload: bytes, width: int, height: int, byte_order: str = "bgra") -> bytes:
+def unpack_argb8888(payload: bytes, width: int, height: int, byte_order: str = "argb") -> bytes:
     out = bytearray(width * height * 4)
 
     for i in range(0, width * height * 4, 4):
@@ -240,7 +240,7 @@ def unpack_rgb888(payload: bytes, width: int, height: int) -> bytes:
 
 def decode_rsb(
     data: bytes,
-    argb8888_order: str = "bgra",
+    argb8888_order: str = "argb",
     payload_shift: int = 0,
 ) -> tuple[RSBHeader, Image.Image, int]:
     header = parse_header(data)
@@ -367,7 +367,7 @@ def convert_file(
     src: Path,
     dst: Path | None,
     verbose: bool = True,
-    argb8888_order: str = "bgra",
+    argb8888_order: str = "argb",
     payload_shift: int = 0,
     write_all_8888_variants: bool = False,
     group_by_format: bool = False,
@@ -421,8 +421,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--argb8888-order",
         choices=("bgra", "rgba", "argb", "abgr"),
-        default="bgra",
-        help="Byte order to assume for ARGB8888 payloads (default: bgra)",
+        default="argb",
+        help="Byte order to assume for ARGB8888 payloads (default: argb)",
     )
     parser.add_argument(
         "--payload-shift",

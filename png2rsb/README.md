@@ -42,7 +42,7 @@ By default, this writes:
 
 - Version 8 RSB
 - ARGB8888 pixel format
-- BGRA byte order
+- ARGB byte order
 - Raw/uncompressed pixel payload
 - No mipmaps
 - No surface material
@@ -107,13 +107,13 @@ For 32-bit and 24-bit payloads, the writer supports several byte layouts:
 
 Default:
 
-    --byte-order bgra
+    --byte-order argb
 
-`bgra` is intended to match little-endian A8R8G8B8-style storage and is generally the most useful default for ARGB8888 RSB output.
+`argb` is intended to match little-endian A8R8G8B8-style storage and is generally the most useful default for ARGB8888 RSB output.
 
 Example:
 
-    python png_to_rsb_v89_rsbeditor_anim_fixed.py input.png output.rsb --format argb8888 --byte-order bgra
+    python png_to_rsb_v89_rsbeditor_anim_fixed.py input.png output.rsb --format argb8888 --byte-order argb
 
 For `rgb565`, the byte order option is not used. RGB565 is written as little-endian 16-bit pixel data.
 

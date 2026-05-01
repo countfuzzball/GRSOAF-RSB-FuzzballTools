@@ -396,8 +396,8 @@ def main() -> int:
     core.add_argument(
         "--byte-order",
         choices=BYTE_ORDERS,
-        default="bgra",
-        help="byte layout for 32-bit/24-bit payloads; bgra matches little-endian A8R8G8B8-style storage",
+        default="argb",
+        help="byte layout for 32-bit/24-bit payloads; argb matches little-endian A8R8G8B8-style storage",
     )
     core.add_argument("--flip-y", action="store_true", help="flip the image vertically before writing")
     core.add_argument("--alpha-threshold", type=int, default=128, help="threshold used by argb1555 alpha")

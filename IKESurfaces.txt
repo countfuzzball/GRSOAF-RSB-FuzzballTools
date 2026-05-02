@@ -1,0 +1,30 @@
+List of surfaces that can be set for an RSB: 
+
+Carpet				0
+Concrete			1
+Wood				2
+Metal				3
+Asphalt				4
+Sand				5
+LowGrass			6
+HighGrass			7
+Puddle				8
+Water				9
+Drywall				10
+"Thin Metal"			11
+"Thick Metal"			12
+"Metal Gas Tank"		13
+"Steam Pipe"			14
+"Electrical Panel"		15
+Snow				16
+"Safety Glass"			17
+"Bullet Resistant Glass"	18
+Ice				19
+Mud				20
+Glass				21
+Foliage				22
+Gravel				23
+"Glass Shards"			24
+"Creaky Wood"			25
+"Deep Sand"			26
+"Baked Clay"			27

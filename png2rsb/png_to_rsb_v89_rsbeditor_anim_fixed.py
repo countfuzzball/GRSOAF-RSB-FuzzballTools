@@ -410,6 +410,8 @@ def main() -> int:
     alpha.add_argument("--dst-blend", type=int, default=0)
     alpha.add_argument("--alpha-test", action="store_true")
     alpha.add_argument("--alpha-compare", type=int, default=0)
+    # CF: Alpha ref being set to 128 by default is certainly a choice. Not sure whether to just set it to '0'
+    # by default to just keep it inline with what the user would expect. It only matters if alpha-test is on.
     alpha.add_argument("--alpha-ref", type=int, default=128)
 
     flags = ap.add_argument_group("game/editor flags")
@@ -417,7 +419,7 @@ def main() -> int:
     flags.add_argument("--tiled", action="store_true")
     flags.add_argument("--compress-on-load", action="store_true")
     flags.add_argument("--distortion-map", action="store_true")
-    flags.add_argument("--subsampling", type=int, choices=(0, 1, 2), default=0, help="0=One, 1=Two, 2=Three")
+    flags.add_argument("--subsampling", type=int, choices=(0, 1, 2, 3), default=0, help="0=One, 1=Two, 2=Three, 3=Never")
     flags.add_argument("--surface", type=int, default=-1, help="surface/material id; -1 means none")
     flags.add_argument("--damage-texture", help="write a tentative enabled damage texture record, e.g. grass_damaged.rsb")
 

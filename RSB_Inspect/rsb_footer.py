@@ -28,7 +28,7 @@ SURFACE_NAMES = {
     7: "High Garass",
     8: "Puddle",
     9: "Water",
-    10 "Drywall",
+    10: "Drywall",
     11: "Thin Metal",
     12: "Thick Metal",
     13: "Metal Gas Tank",

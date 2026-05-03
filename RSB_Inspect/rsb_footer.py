@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import struct
+from dataclasses import dataclass
 
 from rsb_format import u32
 
@@ -25,7 +26,7 @@ SURFACE_NAMES = {
     4: "Asphalt",
     5: "Sand",
     6: "Low Grass",
-    7: "High Garass",
+    7: "High Grass",
     8: "Puddle",
     9: "Water",
     10: "Drywall",
@@ -46,8 +47,7 @@ SURFACE_NAMES = {
     25: "Creaky Wood",
     26: "Deep Sand",
     27: "Baked Clay",
-    
-    # 27 - 0x1B: "last known RSBEditor surface entry",
+    # 27 / 0x1B: last known RSBEditor surface entry.
 }
 
 
@@ -64,18 +64,7 @@ BLEND_FUNCTION_NAMES_SRC = {
     9: "Both Inverse Source Alpha",
 }
 
-BLEND_FUNCTION_NAMES_DST = {
-    0: "Zero",
-    1: "One",
-    2: "Source Alpha",
-    3: "Inverse Source Alpha",
-    4: "Source Colour",
-    5: "Inverse Source Colour",
-    6: "Destination Colour",
-    7: "Inverse Destination Colour",
-    8: "Both Source Alpha",
-    9: "Both Inverse Source Alpha",
-}
+BLEND_FUNCTION_NAMES_DST = BLEND_FUNCTION_NAMES_SRC
 
 ALPHA_TEST_FUNCTION_NAMES = {
     0: "Never",
@@ -90,28 +79,35 @@ ALPHA_TEST_FUNCTION_NAMES = {
 
 
 SCROLL_MODE_NAMES = {
-    # footer+0x08 appears to be the master scrolling enabled byte.
     0: "disabled",
     1: "enabled",
 }
 
 
 SCROLL_TYPE_NAMES = {
-    # footer+0x1D is currently mapped from controlled RSBEditor edits.
-    # 0 was seen with horizontal/vertical scrolling.
-    # 1 was seen with rotate scrolling.
     0: "horizontal/vertical",
     1: "rotate",
 }
 
 
 SUBSAMPLING_NAMES = {
-    # RSBEditor appears to store this as a zero-based enum.
     0: "One",
     1: "Two",
     2: "Three",
-    3: "Never"
+    3: "Never",
 }
+
+
+@dataclass(frozen=True)
+class AnimationTail:
+    start_off: int
+    frame_count: int
+    frames: list[tuple[int, int, str]]
+    mipmap_count_off: int
+    mipmap_count: int
+    subsampling_off: int
+    subsampling: int
+    damage_tail_off: int
 
 
 def footer_layout_shift(version: int | None) -> int:
@@ -141,6 +137,12 @@ def u32_at(footer: bytes, off: int) -> int | None:
     return None
 
 
+def i32_at(footer: bytes, off: int) -> int | None:
+    if 0 <= off and off + 4 <= len(footer):
+        return struct.unpack_from("<i", footer, off)[0]
+    return None
+
+
 def f32_at(footer: bytes, off: int) -> float | None:
     if 0 <= off and off + 4 <= len(footer):
         return struct.unpack_from("<f", footer, off)[0]
@@ -155,19 +157,28 @@ def fmt_off(off: int) -> str:
     return f"footer+0x{off:X}"
 
 
+def _decode_rsb_name(raw: bytes) -> str | None:
+    if not raw.endswith(b"\x00"):
+        return None
+    try:
+        s = raw[:-1].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if not s.lower().endswith(".rsb"):
+        return None
+    if not all(32 <= ord(c) <= 126 for c in s):
+        return None
+    return s
+
+
 def scan_length_prefixed_strings(footer: bytes) -> list[tuple[int, int, str]]:
     found: list[tuple[int, int, str]] = []
     for off in range(0, max(0, len(footer) - 4)):
         n = u32(footer, off)
         if 1 <= n <= 260 and off + 4 + n <= len(footer):
-            raw = footer[off + 4:off + 4 + n]
-            if raw.endswith(b"\x00"):
-                try:
-                    s = raw[:-1].decode("ascii")
-                except UnicodeDecodeError:
-                    continue
-                if s.lower().endswith(".rsb") and all(32 <= ord(c) <= 126 for c in s):
-                    found.append((off, n, s))
+            s = _decode_rsb_name(footer[off + 4:off + 4 + n])
+            if s is not None:
+                found.append((off, n, s))
     return found
 
 
@@ -187,80 +198,161 @@ def _looks_like_surface_id(raw: bytes) -> bool:
     """Return True if raw looks like the final signed int32 surface/material id."""
     if len(raw) != 4:
         return False
-
     sid = struct.unpack("<i", raw)[0]
-
-    # Known controlled samples:
-    #   -1 / FF FF FF FF = none
-    #    5              = sand
-    #    0x1B           = last known RSBEditor surface entry
-    #
-    # Treat 0..0x1B as the currently mapped RSBEditor surface range. This
-    # prevents a valid surface id after a damage texture filename being
-    # mistaken for a missing FF FF FF FF terminator.
     return sid == -1 or 0 <= sid <= 0x1B
 
 
-def find_damage_texture_record(footer: bytes) -> tuple[int, str] | None:
+def _parse_explicit_damage_surface_tail(footer: bytes, off: int, *, require_end: bool = False) -> tuple[int, str | None] | None:
     """
-    Look for likely damage texture record:
+    Parse writer/RSBEditor-compatible damage/surface tails.
 
-        uint8  enabled = 1
-        uint32 string_length
-        char   filename[string_length]  # includes NUL
-        int32  following value
-
-    In simple/no-surface cases the following value is often FF FF FF FF
-    (-1 / surface none). If a surface/material is selected, those same four
-    bytes can instead be a valid final surface id such as 05 00 00 00.
-
-    Returns:
-        (footer_offset, filename)
+    Returns (end_offset, filename_or_None). Filename is None for disabled damage.
     """
+    enabled = byte_at(footer, off)
+    if enabled is None:
+        return None
+
+    if enabled == 0:
+        end = off + 5
+        if end > len(footer) or (require_end and end != len(footer)):
+            return None
+        raw_surface = footer[off + 1:off + 5]
+        if not _looks_like_surface_id(raw_surface):
+            return None
+        return end, None
+
+    if enabled == 1:
+        n = u32_at(footer, off + 1)
+        if n is None or n < 5 or n > 260:
+            return None
+        string_start = off + 5
+        string_end = string_start + n
+        end = string_end + 4
+        if end > len(footer) or (require_end and end != len(footer)):
+            return None
+        name = _decode_rsb_name(footer[string_start:string_end])
+        if name is None:
+            return None
+        raw_surface = footer[string_end:string_end + 4]
+        if not _looks_like_surface_id(raw_surface):
+            return None
+        return end, name
+
+    return None
+
+
+def parse_animation_tail(footer: bytes, version: int | None = None) -> AnimationTail | None:
+    """
+    Parse canonical animation records from the newer writer/RSBEditor layout.
+
+    Shape:
+      footer+0x31: uint32 frame_count
+      repeated:    uint32 name_len, ASCII .rsb filename including NUL
+      then:        uint32 mipmap_count, uint32 subsampling
+      then:        explicit damage/surface tail
+
+    Zero-frame animation tails are ambiguous with the fixed non-animation layout,
+    so this parser only returns a match when one or more frame records validate.
+    """
+    start = shifted(0x31, version)
+    frame_count = u32_at(footer, start)
+    if frame_count is None or frame_count <= 0 or frame_count > 128:
+        return None
+
+    frames: list[tuple[int, int, str]] = []
+    off = start + 4
+    for _ in range(frame_count):
+        n = u32_at(footer, off)
+        if n is None or n < 5 or n > 260:
+            return None
+        string_start = off + 4
+        string_end = string_start + n
+        if string_end > len(footer):
+            return None
+        name = _decode_rsb_name(footer[string_start:string_end])
+        if name is None:
+            return None
+        frames.append((off, n, name))
+        off = string_end
+
+    mipmap_count_off = off
+    subsampling_off = off + 4
+    mipmap_count = u32_at(footer, mipmap_count_off)
+    subsampling = u32_at(footer, subsampling_off)
+    if mipmap_count is None or subsampling is None:
+        return None
+    if mipmap_count > 255 or subsampling > 255:
+        return None
+
+    damage_tail_off = off + 8
+    # When load_rsb has already peeled off mipmap payloads, this tail should
+    # reach exactly to the end of the footer. Do not require that here; old or
+    # hand-edited files may contain extra bytes and the inspector can still be
+    # useful.
+    if _parse_explicit_damage_surface_tail(footer, damage_tail_off, require_end=False) is None:
+        return None
+
+    return AnimationTail(
+        start_off=start,
+        frame_count=frame_count,
+        frames=frames,
+        mipmap_count_off=mipmap_count_off,
+        mipmap_count=mipmap_count,
+        subsampling_off=subsampling_off,
+        subsampling=subsampling,
+        damage_tail_off=damage_tail_off,
+    )
+
+
+def find_damage_texture_record(footer: bytes, version: int | None = None) -> tuple[int, str] | None:
+    """
+    Look for likely damage texture record.
+
+    Prefer the structured damage/surface tail positions first:
+      - after the animation variable block, if animation records exist
+      - fixed footer+0x3D for non-animation/current writer output
+
+    Fallback scanning is retained for older samples and exploratory files.
+    """
+    anim = parse_animation_tail(footer, version)
+    if anim is not None:
+        parsed = _parse_explicit_damage_surface_tail(footer, anim.damage_tail_off, require_end=False)
+        if parsed and parsed[1] is not None:
+            return anim.damage_tail_off, parsed[1]
+
+    fixed_tail_off = shifted(0x3D, version)
+    parsed = _parse_explicit_damage_surface_tail(footer, fixed_tail_off, require_end=False)
+    if parsed and parsed[1] is not None:
+        return fixed_tail_off, parsed[1]
+
     for off in range(0, max(0, len(footer) - 9)):
         enabled = footer[off]
         if enabled != 1:
             continue
 
-        try:
-            n = struct.unpack_from("<I", footer, off + 1)[0]
-        except struct.error:
+        n = u32_at(footer, off + 1)
+        if n is None or n < 5 or n > 260:
             continue
 
         string_start = off + 5
         string_end = string_start + n
         following_start = string_end
         following_end = following_start + 4
-
-        if n < 5 or n > 260:
-            continue
         if following_end > len(footer):
             continue
 
-        raw = footer[string_start:string_end]
+        name = _decode_rsb_name(footer[string_start:string_end])
+        if name is None:
+            continue
+
         following = footer[following_start:following_end]
-
-        if not raw.endswith(b"\x00"):
-            continue
-
-        try:
-            name = raw[:-1].decode("ascii")
-        except UnicodeDecodeError:
-            continue
-
-        if not name.lower().endswith(".rsb"):
-            continue
-
-        # Old logic required FF FF FF FF here. That fails when the selected
-        # surface id is stored immediately after the damage texture string.
-        # Only accept non-FF values when they are exactly the footer tail,
-        # where parse_surface_id() expects the surface/material id to live.
         if following == b"\xFF\xFF\xFF\xFF":
             return off, name
         if following_end == len(footer) and _looks_like_surface_id(following):
             return off, name
 
     return None
+
 
 def parse_surface_id(footer: bytes) -> tuple[int, str] | None:
     """Parse the final signed int32 surface/material id."""
@@ -270,8 +362,16 @@ def parse_surface_id(footer: bytes) -> tuple[int, str] | None:
     return sid, SURFACE_NAMES.get(sid, "unknown surface index")
 
 
-def find_animation_frame_records(footer: bytes, damage_record: tuple[int, str] | None = None) -> list[tuple[int, int, str]]:
-    """Find likely length-prefixed animation frame .rsb references, excluding damage texture if found."""
+def find_animation_frame_records(
+    footer: bytes,
+    damage_record: tuple[int, str] | None = None,
+    version: int | None = None,
+) -> list[tuple[int, int, str]]:
+    """Find likely length-prefixed animation frame .rsb references."""
+    anim = parse_animation_tail(footer, version)
+    if anim is not None:
+        return anim.frames
+
     records = scan_length_prefixed_strings(footer)
     if not damage_record:
         return records
@@ -280,204 +380,119 @@ def find_animation_frame_records(footer: bytes, damage_record: tuple[int, str] |
     return [r for r in records if not (r[0] == damage_length_off and r[2] == damage_name)]
 
 
-def describe_alpha_blend(footer: bytes, version: int | None = None) -> list[str]:
+
+def _byte_state(v: int | None) -> str:
+    if v is None:
+        return "unavailable"
+    return "enabled" if v else "disabled"
+
+
+def _fmt_u32(v: int | None, names: dict[int, str] | None = None) -> str:
+    if v is None:
+        return "unavailable"
+    if names is not None:
+        return f"{v} ({names.get(v, 'unknown')})"
+    return str(v)
+
+
+def _fmt_f32(v: float | None) -> str:
+    return "unavailable" if v is None else repr(v)
+
+
+def parse_damage_surface_tail(
+    footer: bytes,
+    off: int,
+    *,
+    require_end: bool = False,
+) -> dict[str, object] | None:
     """
-    Tentative alpha blend mapping, based on controlled RSBEditor edits:
+    Parse the explicit damage/surface tail used by current writer output.
 
-        canonical v8/v9 footer+0x04 = alpha blend enabled
-        canonical v8/v9 footer+0x10 = source blend function/index
-        canonical v8/v9 footer+0x14 = destination blend function/index
+    Disabled:
+      uint8  damage_enabled = 0
+      int32  surface_id
 
-    v6 examples appear shifted one byte earlier.
+    Enabled:
+      uint8  damage_enabled = 1
+      uint32 filename_length
+      char   filename[filename_length]  # includes NUL
+      int32  surface_id
     """
-    lines: list[str] = []
-    enabled_off = shifted(0x04, version)
-    src_off = shifted(0x10, version)
-    dst_off = shifted(0x14, version)
+    parsed = _parse_explicit_damage_surface_tail(footer, off, require_end=require_end)
+    if parsed is None:
+        return None
 
-    enabled = byte_at(footer, enabled_off)
-    src = u32_at(footer, src_off)
-    dst = u32_at(footer, dst_off)
+    end, filename = parsed
+    enabled = byte_at(footer, off)
+    surface_off = end - 4
+    sid = i32_at(footer, surface_off)
+    raw_surface = footer[surface_off:end]
 
-    state = "unknown" if enabled is None else ("enabled" if enabled else "disabled")
-    lines.append(f"{fmt_off(enabled_off)} alpha blend enabled byte:  {fmt_byte(enabled)} ({state})")
+    return {
+        "start_off": off,
+        "end_off": end,
+        "enabled": bool(enabled),
+        "filename": filename,
+        "surface_off": surface_off,
+        "surface_id": sid,
+        "surface_name": SURFACE_NAMES.get(sid, "unknown surface index"),
+        "surface_raw": raw_surface,
+    }
 
-    if src is None:
-        lines.append(f"{fmt_off(src_off)} source blend function:    unavailable")
+
+def find_resolved_damage_surface_tail(footer: bytes, version: int | None = None) -> dict[str, object] | None:
+    """Return the best-known damage/surface tail based on resolved layout."""
+    anim = parse_animation_tail(footer, version)
+    if anim is not None:
+        parsed = parse_damage_surface_tail(footer, anim.damage_tail_off, require_end=False)
+        if parsed is not None:
+            return parsed
+
+    fixed_tail_off = shifted(0x3D, version)
+    parsed = parse_damage_surface_tail(footer, fixed_tail_off, require_end=False)
+    if parsed is not None:
+        return parsed
+
+    return None
+
+
+def _append_byte_line(lines: list[str], footer: bytes, off: int, label: str, *, names: dict[int, str] | None = None, as_enabled: bool = False) -> None:
+    value = byte_at(footer, off)
+    if value is None:
+        lines.append(f"{fmt_off(off)} {label}: unavailable")
+        return
+    if as_enabled:
+        lines.append(f"{fmt_off(off)} {label}: 0x{value:02X} ({_byte_state(value)})")
+    elif names is not None:
+        lines.append(f"{fmt_off(off)} {label}: 0x{value:02X} ({names.get(value, 'unknown')})")
     else:
-        lines.append(f"{fmt_off(src_off)} source blend function:    {src} ({BLEND_FUNCTION_NAMES_SRC.get(src, 'unknown blend function')})")
+        lines.append(f"{fmt_off(off)} {label}: 0x{value:02X}")
 
-    if dst is None:
-        lines.append(f"{fmt_off(dst_off)} destination blend function: unavailable")
+
+def _append_u32_line(lines: list[str], footer: bytes, off: int, label: str, *, names: dict[int, str] | None = None) -> None:
+    value = u32_at(footer, off)
+    if value is None:
+        lines.append(f"{fmt_off(off)} {label}: unavailable")
+        return
+    if names is not None:
+        lines.append(f"{fmt_off(off)} {label}: {value} ({names.get(value, 'unknown')})")
     else:
-        lines.append(f"{fmt_off(dst_off)} destination blend function: {dst} ({BLEND_FUNCTION_NAMES_DST.get(dst, 'unknown blend function')})")
-
-    return lines
+        lines.append(f"{fmt_off(off)} {label}: {value}")
 
 
-def describe_alpha_test(footer: bytes, version: int | None = None) -> list[str]:
+def _append_f32_line(lines: list[str], footer: bytes, off: int, label: str) -> None:
+    lines.append(f"{fmt_off(off)} {label}: {_fmt_f32(f32_at(footer, off))}")
+
+
+def describe_footer_linear(footer: bytes, version: int | None = None) -> list[str]:
     """
-    Tentative alpha test mapping. This is separate from alpha blending; an RSB
-    can plausibly use alpha blend, alpha test, both, or neither.
+    Present the resolved footer layout in byte-order.
+
+    This deliberately avoids printing the obsolete fixed mipmap/subsampling
+    offsets when animation records have displaced them. For animation files,
+    the actual mipmap_count/subsampling values are shown where they really live
+    in the variable animation tail.
     """
-    lines: list[str] = []
-    enabled_off = shifted(0x05, version)
-    compare_off = shifted(0x18, version)
-    reference_off = shifted(0x1C, version)
-
-    enabled = byte_at(footer, enabled_off)
-    compare = u32_at(footer, compare_off)
-    reference = byte_at(footer, reference_off)
-
-    state = "unknown" if enabled is None else ("enabled" if enabled else "disabled")
-    lines.append(f"{fmt_off(enabled_off)} alpha test enabled byte:   {fmt_byte(enabled)} ({state})")
-
-    if compare is None:
-        lines.append(f"{fmt_off(compare_off)} alpha test compare func:  unavailable")
-    else:
-        lines.append(f"{fmt_off(compare_off)} alpha test compare func:  {compare} ({ALPHA_TEST_FUNCTION_NAMES.get(compare, 'unknown compare function')})")
-
-    if reference is None:
-        lines.append(f"{fmt_off(reference_off)} alpha test reference:     unavailable")
-    else:
-        lines.append(f"{fmt_off(reference_off)} alpha test reference:     {reference}")
-
-    return lines
-
-
-def describe_mipmap_fields(footer: bytes, version: int | None = None) -> list[str]:
-    """
-    Mipmap/tiled footer mapping, based on controlled RSBEditor edits:
-
-        canonical v8/v9 footer+0x06 = mipmaps enabled byte
-        canonical v8/v9 footer+0x09 = tiled enabled byte
-        canonical v8/v9 footer+0x35 = mipmap count
-
-    Generated mipmap payloads appear after the normal footer metadata.
-    v6 examples, if applicable, are expected to use the same -1 byte shift
-    as other footer fields until proven otherwise.
-    """
-    lines: list[str] = []
-    enabled_off = shifted(0x06, version)
-    tiled_off = shifted(0x09, version)
-    count_off = shifted(0x35, version)
-
-    enabled = byte_at(footer, enabled_off)
-    tiled = byte_at(footer, tiled_off)
-    count = byte_at(footer, count_off)
-
-    enabled_state = "unknown" if enabled is None else ("enabled" if enabled else "disabled")
-    tiled_state = "unknown" if tiled is None else ("enabled" if tiled else "disabled")
-
-    lines.append(f"{fmt_off(enabled_off)} mipmaps enabled byte: {fmt_byte(enabled)} ({enabled_state})")
-    lines.append(f"{fmt_off(tiled_off)} tiled enabled byte:   {fmt_byte(tiled)} ({tiled_state})")
-    if count is None:
-        lines.append(f"{fmt_off(count_off)} mipmap count byte:    unavailable")
-    else:
-        lines.append(f"{fmt_off(count_off)} mipmap count byte:    {count}")
-
-    return lines
-
-
-def describe_scrolling(footer: bytes, version: int | None = None) -> list[str]:
-    """
-    Tentative scrolling mapping, based on controlled RSBEditor edits:
-
-        canonical v8/v9 footer+0x08 = scrolling enabled byte
-        canonical v8/v9 footer+0x1D = scrolling type/function
-        canonical v8/v9 footer+0x21 = horizontal/primary/rotation rate float32
-        canonical v8/v9 footer+0x25 = vertical scroll rate float32
-
-    Controlled samples so far:
-      - no scrolling:          +0x08=0, +0x1D=0, rates 0/0
-      - horizontal/vertical:   +0x08=1, +0x1D=0, rates 25/100
-      - rotate, 62 deg/sec:    +0x08=1, +0x1D=1, primary rate 62
-
-    For rotate, the +0x25 vertical-rate field may be ignored/stale by the
-    editor/engine; in the current sample it retained 100.0 from a previous
-    horizontal/vertical setting. v6 examples appear shifted one byte earlier.
-    """
-    lines: list[str] = []
-    enabled_off = shifted(0x08, version)
-    type_off = shifted(0x1D, version)
-    primary_rate_off = shifted(0x21, version)
-    secondary_rate_off = shifted(0x25, version)
-
-    enabled = byte_at(footer, enabled_off)
-    scroll_type = byte_at(footer, type_off)
-    primary_rate = f32_at(footer, primary_rate_off)
-    secondary_rate = f32_at(footer, secondary_rate_off)
-
-    if enabled is None:
-        lines.append(f"{fmt_off(enabled_off)} scrolling enabled byte: unavailable")
-    else:
-        lines.append(
-            f"{fmt_off(enabled_off)} scrolling enabled byte: 0x{enabled:02X} "
-            f"({SCROLL_MODE_NAMES.get(enabled, 'unknown enabled value')})"
-        )
-
-    if scroll_type is None:
-        lines.append(f"{fmt_off(type_off)} scrolling type byte:    unavailable")
-    else:
-        lines.append(
-            f"{fmt_off(type_off)} scrolling type byte:    0x{scroll_type:02X} "
-            f"({SCROLL_TYPE_NAMES.get(scroll_type, 'unknown scroll type')})"
-        )
-
-    type_name = SCROLL_TYPE_NAMES.get(scroll_type, "unknown") if scroll_type is not None else "unknown"
-    if type_name == "rotate":
-        lines.append(f"{fmt_off(primary_rate_off)} rotation rate f32:      {primary_rate!r} degrees/sec?")
-        lines.append(f"{fmt_off(secondary_rate_off)} secondary/unused f32:  {secondary_rate!r}")
-    else:
-        lines.append(f"{fmt_off(primary_rate_off)} horizontal/primary rate f32: {primary_rate!r}")
-        lines.append(f"{fmt_off(secondary_rate_off)} vertical/secondary rate f32: {secondary_rate!r}")
-
-    return lines
-
-
-def describe_misc_texture_flags(footer: bytes, version: int | None = None) -> list[str]:
-    """
-    Miscellaneous RSBEditor texture/export flags, based on controlled edits:
-
-        canonical v8/v9 footer+0x0A = compress on load enabled
-        canonical v8/v9 footer+0x0B = distortion map enabled
-        canonical v8/v9 footer+0x39 = subsampling enum
-
-    Subsampling appears zero-based in current samples:
-        0 = One/default
-        1 = Two
-        2 = Three
-
-    These fields are metadata only in the samples tested; they did not change
-    the image payload size. v6/older files use the normal footer offset shift
-    until proven otherwise.
-    """
-    lines: list[str] = []
-    compress_off = shifted(0x0A, version)
-    distortion_off = shifted(0x0B, version)
-    subsampling_off = shifted(0x39, version)
-
-    compress = byte_at(footer, compress_off)
-    distortion = byte_at(footer, distortion_off)
-    subsampling = byte_at(footer, subsampling_off)
-
-    compress_state = "unknown" if compress is None else ("enabled" if compress else "disabled")
-    distortion_state = "unknown" if distortion is None else ("enabled" if distortion else "disabled")
-
-    lines.append(f"{fmt_off(compress_off)} compress on load byte: {fmt_byte(compress)} ({compress_state})")
-    lines.append(f"{fmt_off(distortion_off)} distortion map byte:   {fmt_byte(distortion)} ({distortion_state})")
-    if subsampling is None:
-        lines.append(f"{fmt_off(subsampling_off)} subsampling enum:     unavailable")
-    else:
-        lines.append(
-            f"{fmt_off(subsampling_off)} subsampling enum:     {subsampling} "
-            f"({SUBSAMPLING_NAMES.get(subsampling, 'unknown subsampling value')})"
-        )
-
-    return lines
-
-
-def try_v8_footer_map(footer: bytes, version: int | None = None) -> list[str]:
     lines: list[str] = []
     if len(footer) <= 0x1C:
         return ["Footer too small for known metadata guesses."]
@@ -485,39 +500,101 @@ def try_v8_footer_map(footer: bytes, version: int | None = None) -> list[str]:
     if footer_layout_shift(version):
         lines.append("layout note: using v6/older footer offset adjustment (-1 byte vs v8/v9 canonical offsets)")
 
+    # Fixed prefix, in ascending offset order.
+    _append_byte_line(lines, footer, shifted(0x04, version), "alpha blend enabled", as_enabled=True)
+    _append_byte_line(lines, footer, shifted(0x05, version), "alpha test enabled", as_enabled=True)
+    _append_byte_line(lines, footer, shifted(0x06, version), "mipmaps enabled", as_enabled=True)
+    _append_byte_line(lines, footer, shifted(0x07, version), "animation enabled", as_enabled=True)
+    _append_byte_line(lines, footer, shifted(0x08, version), "scrolling enabled", names=SCROLL_MODE_NAMES)
+    _append_byte_line(lines, footer, shifted(0x09, version), "tiled enabled", as_enabled=True)
+    _append_byte_line(lines, footer, shifted(0x0A, version), "compress on load", as_enabled=True)
+    _append_byte_line(lines, footer, shifted(0x0B, version), "distortion map", as_enabled=True)
+
     game_off = shifted(0x0C, version)
     game = byte_at(footer, game_off)
     if game is None:
         lines.append(f"{fmt_off(game_off)} game flags: unavailable")
     else:
         enabled = [name for bit, name in GAME_FLAGS if game & bit]
-        lines.append(f"{fmt_off(game_off)} game flags: 0x{game:02X}" + (f" ({', '.join(enabled)})" if enabled else " (none known)"))
+        suffix = f" ({', '.join(enabled)})" if enabled else " (none known)"
+        lines.append(f"{fmt_off(game_off)} game flags: 0x{game:02X}{suffix}")
 
-    lines.append("Alpha blend:")
-    lines.extend(f"  {line}" for line in describe_alpha_blend(footer, version))
+    _append_u32_line(lines, footer, shifted(0x10, version), "source blend function", names=BLEND_FUNCTION_NAMES_SRC)
+    _append_u32_line(lines, footer, shifted(0x14, version), "destination blend function", names=BLEND_FUNCTION_NAMES_DST)
+    _append_u32_line(lines, footer, shifted(0x18, version), "alpha test compare function", names=ALPHA_TEST_FUNCTION_NAMES)
 
-    lines.append("Alpha test:")
-    lines.extend(f"  {line}" for line in describe_alpha_test(footer, version))
+    ref_off = shifted(0x1C, version)
+    ref = byte_at(footer, ref_off)
+    lines.append(f"{fmt_off(ref_off)} alpha test reference: {'unavailable' if ref is None else ref}")
 
-    lines.append("Mipmaps / tiling:")
-    lines.extend(f"  {line}" for line in describe_mipmap_fields(footer, version))
+    _append_byte_line(lines, footer, shifted(0x1D, version), "scrolling type", names=SCROLL_TYPE_NAMES)
+    scroll_type = byte_at(footer, shifted(0x1D, version))
+    scroll_type_name = SCROLL_TYPE_NAMES.get(scroll_type, "unknown") if scroll_type is not None else "unknown"
+    if scroll_type_name == "rotate":
+        _append_f32_line(lines, footer, shifted(0x21, version), "rotation rate f32")
+        _append_f32_line(lines, footer, shifted(0x25, version), "secondary/unused f32")
+    else:
+        _append_f32_line(lines, footer, shifted(0x21, version), "horizontal/primary scroll rate f32")
+        _append_f32_line(lines, footer, shifted(0x25, version), "vertical/secondary scroll rate f32")
 
-    lines.append("Scrolling:")
-    lines.extend(f"  {line}" for line in describe_scrolling(footer, version))
+    _append_byte_line(lines, footer, shifted(0x29, version), "animation type", names={0: "none", 1: "oscillate", 2: "constant"})
+    _append_f32_line(lines, footer, shifted(0x2D, version), "animation delay f32")
 
-    lines.append("Misc texture/export flags:")
-    lines.extend(f"  {line}" for line in describe_misc_texture_flags(footer, version))
+    # Variable/final part, also in actual file order.
+    anim = parse_animation_tail(footer, version)
+    if anim is not None:
+        lines.append(f"{fmt_off(anim.start_off)} animation frame count uint32: {anim.frame_count}")
+        for idx, (len_off, n, name) in enumerate(anim.frames, 1):
+            string_off = len_off + 4
+            end_off = string_off + n
+            lines.append(f"{fmt_off(len_off)} animation frame {idx} length uint32: {n}")
+            lines.append(f"{fmt_off(string_off)} animation frame {idx} string: {name!r} (ends before {fmt_off(end_off)})")
+        lines.append(f"{fmt_off(anim.mipmap_count_off)} mipmap count uint32: {anim.mipmap_count}")
+        lines.append(
+            f"{fmt_off(anim.subsampling_off)} subsampling uint32: {anim.subsampling} "
+            f"({SUBSAMPLING_NAMES.get(anim.subsampling, 'unknown subsampling value')})"
+        )
+        damage = parse_damage_surface_tail(footer, anim.damage_tail_off, require_end=False)
+    else:
+        fixed_count_off = shifted(0x35, version)
+        fixed_subsampling_off = shifted(0x39, version)
+        _append_byte_line(lines, footer, fixed_count_off, "mipmap count byte")
+        subsampling = byte_at(footer, fixed_subsampling_off)
+        if subsampling is None:
+            lines.append(f"{fmt_off(fixed_subsampling_off)} subsampling byte: unavailable")
+        else:
+            lines.append(
+                f"{fmt_off(fixed_subsampling_off)} subsampling byte: {subsampling} "
+                f"({SUBSAMPLING_NAMES.get(subsampling, 'unknown subsampling value')})"
+            )
+        damage = parse_damage_surface_tail(footer, shifted(0x3D, version), require_end=False)
 
-    if len(footer) > 0x30:
-        anim_enable_off = shifted(0x07, version)
-        anim_type_off = shifted(0x29, version)
-        delay_off = shifted(0x2D, version)
-        anim_enable = byte_at(footer, anim_enable_off)
-        anim_type = byte_at(footer, anim_type_off)
-        delay = f32_at(footer, delay_off)
-        type_name = "unavailable" if anim_type is None else {1: "oscillate?", 2: "constant?"}.get(anim_type, "unknown/none")
-        lines.append(f"{fmt_off(anim_enable_off)} animation-ish enabled byte: {fmt_byte(anim_enable)}")
-        lines.append(f"{fmt_off(anim_type_off)} animation type-ish byte:    {fmt_byte(anim_type)} ({type_name})")
-        lines.append(f"{fmt_off(delay_off)} float32 delay-ish seconds:  {delay!r}")
+    if damage is None:
+        tail_off = shifted(0x3D, version) if anim is None else anim.damage_tail_off
+        lines.append(f"{fmt_off(tail_off)} damage/surface tail: not parsed")
+    else:
+        start_off = int(damage["start_off"])
+        surface_off = int(damage["surface_off"])
+        end_off = int(damage["end_off"])
+        enabled = bool(damage["enabled"])
+        filename = damage["filename"]
+        lines.append(f"{fmt_off(start_off)} damage texture enabled byte: 0x{1 if enabled else 0:02X} ({'enabled' if enabled else 'disabled'})")
+        if enabled:
+            name_len_off = start_off + 1
+            name_len = u32_at(footer, name_len_off)
+            name_off = start_off + 5
+            lines.append(f"{fmt_off(name_len_off)} damage texture length uint32: {name_len}")
+            lines.append(f"{fmt_off(name_off)} damage texture string: {filename!r} (ends before {fmt_off(surface_off)})")
+        sid = damage["surface_id"]
+        surface_name = damage["surface_name"]
+        raw = bytes(damage["surface_raw"]).hex(" ")
+        lines.append(f"{fmt_off(surface_off)} surface int32: {sid} ({surface_name}); raw {raw}")
+        if end_off != len(footer):
+            lines.append(f"{fmt_off(end_off)} footer bytes continue after parsed damage/surface tail ({len(footer) - end_off} byte(s))")
 
     return lines
+
+
+# Backward-compatible names used by older inspector scripts.
+def try_v8_footer_map(footer: bytes, version: int | None = None) -> list[str]:
+    return describe_footer_linear(footer, version)

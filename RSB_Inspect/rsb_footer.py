@@ -18,33 +18,74 @@ GAME_FLAGS = [
 
 SURFACE_NAMES = {
     -1: "none",
-    5: "sand",
-    0x1B: "last known RSBEditor surface entry",
+    0: "Carpet",
+    1: "Concrete",
+    2: "Wood",
+    3: "Metal",
+    4: "Asphalt",
+    5: "Sand",
+    6: "Low Grass",
+    7: "High Garass",
+    8: "Puddle",
+    9: "Water",
+    10 "Drywall",
+    11: "Thin Metal",
+    12: "Thick Metal",
+    13: "Metal Gas Tank",
+    14: "Steam Pipe",
+    15: "Electrical Panel",
+    16: "Snow",
+    17: "Safety Glass",
+    18: "Bullet Resistant Glass",
+    19: "Ice",
+    20: "Mud",
+    21: "Glass",
+    22: "Foliage",
+    23: "Gravel",
+    24: "Glass Shards",
+    25: "Creaky Wood",
+    26: "Deep Sand",
+    27: "Baked Clay",
+    
+    # 27 - 0x1B: "last known RSBEditor surface entry",
 }
 
 
-BLEND_FUNCTION_NAMES = {
-    # Names are intentionally tentative until the full RSBEditor list is mapped.
-    0: "blend function 0",
-    1: "blend function 1",
-    2: "blend function 2",
-    3: "blend function 3",
-    4: "blend function 4",
-    5: "blend function 5",
-    6: "blend function 6",
-    7: "blend function 7",
+BLEND_FUNCTION_NAMES_SRC = {
+    0: "Zero",
+    1: "One",
+    2: "Source Alpha",
+    3: "Inverse Source Alpha",
+    4: "Source Colour",
+    5: "Inverse Source Colour",
+    6: "Destination Colour",
+    7: "Inverse Destination Colour",
+    8: "Both Source Alpha",
+    9: "Both Inverse Source Alpha",
 }
 
+BLEND_FUNCTION_NAMES_DST = {
+    0: "Zero",
+    1: "One",
+    2: "Source Alpha",
+    3: "Inverse Source Alpha",
+    4: "Source Colour",
+    5: "Inverse Source Colour",
+    6: "Destination Colour",
+    7: "Inverse Destination Colour",
+    8: "Both Source Alpha",
+    9: "Both Inverse Source Alpha",
+}
 
 ALPHA_TEST_FUNCTION_NAMES = {
-    0: "compare function 0",
-    1: "compare function 1",
-    2: "compare function 2",
-    3: "compare function 3",
-    4: "compare function 4",
-    5: "compare function 5",
-    6: "compare function 6",
-    7: "compare function 7",
+    0: "Never",
+    1: "Less",
+    2: "Equal",
+    3: "Less/Equal",
+    4: "Greater",
+    5: "Not Equal",
+    6: "Greater/Equal",
+    7: "Always",
 }
 
 
@@ -69,6 +110,7 @@ SUBSAMPLING_NAMES = {
     0: "One",
     1: "Two",
     2: "Three",
+    3: "Never"
 }
 
 
@@ -263,12 +305,12 @@ def describe_alpha_blend(footer: bytes, version: int | None = None) -> list[str]
     if src is None:
         lines.append(f"{fmt_off(src_off)} source blend function:    unavailable")
     else:
-        lines.append(f"{fmt_off(src_off)} source blend function:    {src} ({BLEND_FUNCTION_NAMES.get(src, 'unknown blend function')})")
+        lines.append(f"{fmt_off(src_off)} source blend function:    {src} ({BLEND_FUNCTION_NAMES_SRC.get(src, 'unknown blend function')})")
 
     if dst is None:
         lines.append(f"{fmt_off(dst_off)} destination blend function: unavailable")
     else:
-        lines.append(f"{fmt_off(dst_off)} destination blend function: {dst} ({BLEND_FUNCTION_NAMES.get(dst, 'unknown blend function')})")
+        lines.append(f"{fmt_off(dst_off)} destination blend function: {dst} ({BLEND_FUNCTION_NAMES_DST.get(dst, 'unknown blend function')})")
 
     return lines
 

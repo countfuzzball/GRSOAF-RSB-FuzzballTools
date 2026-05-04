@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import dataclass
+from typing import Any
 
 from rsb_format import u32
 
@@ -484,6 +485,79 @@ def _append_f32_line(lines: list[str], footer: bytes, off: int, label: str) -> N
     lines.append(f"{fmt_off(off)} {label}: {_fmt_f32(f32_at(footer, off))}")
 
 
+
+# ---------------------------------------------------------------------------
+# Opaque trailer / authoring-resource detection
+# ---------------------------------------------------------------------------
+
+
+def find_8bim_marker(footer: bytes, *, search_limit: int = 64) -> int | None:
+    """
+    Return the offset of an early Adobe/Photoshop-style '8BIM' marker.
+
+    Some official RGB565/object RSBs contain post-payload authoring cruft rather
+    than an RSBEditor-style footer. If the inspector blindly treats those bytes
+    as footer fields, ASCII '8BIM' becomes hilarious nonsense like tiled=0x42.
+    """
+    if not footer:
+        return None
+    off = footer[:max(0, min(len(footer), search_limit))].find(b"8BIM")
+    return None if off < 0 else off
+
+
+def has_early_8bim_marker(footer: bytes) -> bool:
+    return find_8bim_marker(footer) is not None
+
+
+def describe_8bim_opaque_trailer(footer: bytes, version: int | None = None) -> list[str]:
+    """Return a safe/default footer report for an opaque 8BIM trailer."""
+    marker_off = find_8bim_marker(footer)
+    marker = "footer+0x?" if marker_off is None else fmt_off(marker_off)
+    lines = [
+        f"opaque trailer note: '8BIM' marker detected at {marker} — probable legacy Photoshop/Adobe resource data.",
+        "known RSBEditor-style fields below are shown as disabled/defaults instead of interpreting the raw trailer bytes.",
+        "raw trailer is preserved for inspection, but ignored as RSB metadata.",
+    ]
+
+    def bline(base: int, label: str, suffix: str = "disabled") -> None:
+        lines.append(f"{fmt_off(shifted(base, version))} {label}: 0x00 ({suffix}) [suppressed from 8BIM trailer]")
+
+    def uline(base: int, label: str, name: str | None = None) -> None:
+        extra = f" ({name})" if name else ""
+        lines.append(f"{fmt_off(shifted(base, version))} {label}: 0{extra} [suppressed from 8BIM trailer]")
+
+    bline(0x04, "alpha blend enabled")
+    bline(0x05, "alpha test enabled")
+    bline(0x06, "mipmaps enabled")
+    bline(0x07, "animation enabled")
+    bline(0x08, "scrolling enabled")
+    bline(0x09, "tiled enabled")
+    bline(0x0A, "compress on load")
+    bline(0x0B, "distortion map")
+    lines.append(f"{fmt_off(shifted(0x0C, version))} game flags: 0x00 (none known) [suppressed from 8BIM trailer]")
+    uline(0x10, "source blend function", "Zero")
+    uline(0x14, "destination blend function", "Zero")
+    uline(0x18, "alpha test compare function", "Never")
+    lines.append(f"{fmt_off(shifted(0x1C, version))} alpha test reference: 0 [suppressed from 8BIM trailer]")
+    uline(0x1D, "scrolling type", "horizontal/vertical")
+    lines.append(f"{fmt_off(shifted(0x21, version))} horizontal/primary scroll rate f32: 0.0 [suppressed from 8BIM trailer]")
+    lines.append(f"{fmt_off(shifted(0x25, version))} vertical/secondary scroll rate f32: 0.0 [suppressed from 8BIM trailer]")
+    bline(0x29, "animation type", "disabled")
+    lines.append(f"{fmt_off(shifted(0x2D, version))} animation delay f32: 0.0 [suppressed from 8BIM trailer]")
+    lines.append(f"{fmt_off(shifted(0x35, version))} mipmap count byte: 0 [suppressed from 8BIM trailer]")
+    lines.append(f"{fmt_off(shifted(0x39, version))} subsampling byte: 0 (One) [suppressed from 8BIM trailer]")
+    lines.append(f"{fmt_off(shifted(0x3D, version))} damage texture enabled byte: 0x00 (disabled) [suppressed from 8BIM trailer]")
+
+    surface = parse_surface_id(footer)
+    if surface is not None:
+        sid, surface_name = surface
+        raw = footer[-4:].hex(" ")
+        lines.append(f"{fmt_off(len(footer) - 4)} final surface-like int32: {sid} ({surface_name}); raw {raw} [reported cautiously]")
+    else:
+        lines.append("surface int32: unavailable")
+    return lines
+
+
 def describe_footer_linear(footer: bytes, version: int | None = None) -> list[str]:
     """
     Present the resolved footer layout in byte-order.
@@ -496,6 +570,9 @@ def describe_footer_linear(footer: bytes, version: int | None = None) -> list[st
     lines: list[str] = []
     if len(footer) <= 0x1C:
         return ["Footer too small for known metadata guesses."]
+
+    if has_early_8bim_marker(footer):
+        return describe_8bim_opaque_trailer(footer, version)
 
     if footer_layout_shift(version):
         lines.append("layout note: using v6/older footer offset adjustment (-1 byte vs v8/v9 canonical offsets)")
@@ -593,6 +670,417 @@ def describe_footer_linear(footer: bytes, version: int | None = None) -> list[st
             lines.append(f"{fmt_off(end_off)} footer bytes continue after parsed damage/surface tail ({len(footer) - end_off} byte(s))")
 
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Structured metadata output for tools/GUI callers.
+# ---------------------------------------------------------------------------
+
+def _offset_obj(off: int, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    obj: dict[str, Any] = {
+        "footer_offset": off,
+        "footer_offset_hex": f"footer+0x{off:X}",
+    }
+    if absolute_footer_start is not None:
+        obj["absolute_offset"] = absolute_footer_start + off
+        obj["absolute_offset_hex"] = f"0x{absolute_footer_start + off:X}"
+    return obj
+
+
+def _byte_field(footer: bytes, off: int, *, names: dict[int, str] | None = None, enabled: bool = False, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    value = byte_at(footer, off)
+    obj = _offset_obj(off, absolute_footer_start)
+    obj["available"] = value is not None
+    obj["value"] = value
+    obj["value_hex"] = None if value is None else f"0x{value:02X}"
+    if enabled:
+        obj["enabled"] = None if value is None else bool(value)
+    if names is not None:
+        obj["name"] = None if value is None else names.get(value, "unknown")
+    return obj
+
+
+def _u32_field(footer: bytes, off: int, *, names: dict[int, str] | None = None, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    value = u32_at(footer, off)
+    obj = _offset_obj(off, absolute_footer_start)
+    obj["available"] = value is not None
+    obj["value"] = value
+    if names is not None:
+        obj["name"] = None if value is None else names.get(value, "unknown")
+    return obj
+
+
+def _i32_field(footer: bytes, off: int, *, names: dict[int, str] | None = None, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    value = i32_at(footer, off)
+    obj = _offset_obj(off, absolute_footer_start)
+    obj["available"] = value is not None
+    obj["value"] = value
+    if names is not None:
+        obj["name"] = None if value is None else names.get(value, "unknown")
+    return obj
+
+
+def _f32_field(footer: bytes, off: int, *, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    value = f32_at(footer, off)
+    obj = _offset_obj(off, absolute_footer_start)
+    obj["available"] = value is not None
+    obj["value"] = value
+    return obj
+
+
+def _game_flags_obj(footer: bytes, off: int, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    value = byte_at(footer, off)
+    obj = _offset_obj(off, absolute_footer_start)
+    obj["available"] = value is not None
+    obj["value"] = value
+    obj["value_hex"] = None if value is None else f"0x{value:02X}"
+    obj["enabled_names"] = [] if value is None else [name for bit, name in GAME_FLAGS if value & bit]
+    obj["bits"] = {
+        name: (None if value is None else bool(value & bit))
+        for bit, name in GAME_FLAGS
+    }
+    return obj
+
+
+def _frame_obj(idx: int, len_off: int, n: int, name: str, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    string_off = len_off + 4
+    end_off = string_off + n
+    return {
+        "index": idx,
+        "filename": name,
+        "length": n,
+        "length_offset": _offset_obj(len_off, absolute_footer_start),
+        "string_offset": _offset_obj(string_off, absolute_footer_start),
+        "end_offset": _offset_obj(end_off, absolute_footer_start),
+    }
+
+
+def _damage_surface_tail_obj(
+    footer: bytes,
+    damage: dict[str, object] | None,
+    *,
+    absolute_footer_start: int | None = None,
+) -> dict[str, Any]:
+    if damage is None:
+        return {"parsed": False}
+
+    start_off = int(damage["start_off"])
+    end_off = int(damage["end_off"])
+    surface_off = int(damage["surface_off"])
+    enabled = bool(damage["enabled"])
+    filename = damage["filename"]
+    raw_surface = bytes(damage["surface_raw"])
+    name_len_off = start_off + 1 if enabled else None
+    name_len = u32_at(footer, name_len_off) if name_len_off is not None else None
+    name_off = start_off + 5 if enabled else None
+
+    return {
+        "parsed": True,
+        "start_offset": _offset_obj(start_off, absolute_footer_start),
+        "end_offset": _offset_obj(end_off, absolute_footer_start),
+        "damage_texture": {
+            "enabled": enabled,
+            "enabled_byte": _byte_field(footer, start_off, enabled=True, absolute_footer_start=absolute_footer_start),
+            "filename": filename,
+            "length": name_len,
+            "length_offset": None if name_len_off is None else _offset_obj(name_len_off, absolute_footer_start),
+            "string_offset": None if name_off is None else _offset_obj(name_off, absolute_footer_start),
+        },
+        "surface": {
+            "value": damage["surface_id"],
+            "name": damage["surface_name"],
+            "raw_hex": raw_surface.hex(" "),
+            "offset": _offset_obj(surface_off, absolute_footer_start),
+        },
+    }
+
+
+
+def _suppressed_byte_field(
+    off: int,
+    *,
+    value: int = 0,
+    names: dict[int, str] | None = None,
+    enabled: bool = False,
+    absolute_footer_start: int | None = None,
+) -> dict[str, Any]:
+    obj = _offset_obj(off, absolute_footer_start)
+    obj.update({
+        "available": True,
+        "value": value,
+        "value_hex": f"0x{value:02X}",
+        "suppressed_from_8bim_trailer": True,
+    })
+    if enabled:
+        obj["enabled"] = bool(value)
+    if names is not None:
+        obj["name"] = names.get(value, "unknown")
+    return obj
+
+
+def _suppressed_u32_field(
+    off: int,
+    *,
+    value: int = 0,
+    names: dict[int, str] | None = None,
+    absolute_footer_start: int | None = None,
+) -> dict[str, Any]:
+    obj = _offset_obj(off, absolute_footer_start)
+    obj.update({
+        "available": True,
+        "value": value,
+        "suppressed_from_8bim_trailer": True,
+    })
+    if names is not None:
+        obj["name"] = names.get(value, "unknown")
+    return obj
+
+
+def _suppressed_f32_field(off: int, *, value: float = 0.0, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    obj = _offset_obj(off, absolute_footer_start)
+    obj.update({
+        "available": True,
+        "value": value,
+        "suppressed_from_8bim_trailer": True,
+    })
+    return obj
+
+
+def _suppressed_game_flags_obj(off: int, absolute_footer_start: int | None = None) -> dict[str, Any]:
+    obj = _offset_obj(off, absolute_footer_start)
+    obj.update({
+        "available": True,
+        "value": 0,
+        "value_hex": "0x00",
+        "enabled_names": [],
+        "bits": {name: False for _, name in GAME_FLAGS},
+        "suppressed_from_8bim_trailer": True,
+    })
+    return obj
+
+
+def _suppressed_8bim_metadata_to_dict(
+    footer: bytes,
+    version: int | None = None,
+    *,
+    absolute_footer_start: int | None = None,
+    include_walk: bool = False,
+    include_raw_scans: bool = False,
+) -> dict[str, Any]:
+    """Return JSON metadata for an opaque 8BIM trailer without interpreting it as RSBEditor fields."""
+    shift = footer_layout_shift(version)
+    marker_off = find_8bim_marker(footer)
+    result: dict[str, Any] = {
+        "size": len(footer),
+        "layout": {
+            "version": version,
+            "shift": shift,
+            "note": "v6/older footer offset adjustment (-1 byte vs v8/v9 canonical offsets)" if shift else None,
+        },
+        "opaque_trailer": {
+            "detected": True,
+            "kind": "8BIM/Photoshop resource data",
+            "marker_offset": None if marker_off is None else _offset_obj(marker_off, absolute_footer_start),
+            "note": "Raw trailer bytes are preserved, but known RSBEditor-style fields are suppressed to disabled/default values.",
+        },
+        "fields": {},
+        "animation_tail": {"detected": False, "suppressed_from_8bim_trailer": True},
+        "damage_surface_tail": {
+            "parsed": False,
+            "suppressed_from_8bim_trailer": True,
+            "damage_texture": {"enabled": False, "filename": None},
+        },
+        "surface": None,
+    }
+
+    if absolute_footer_start is not None:
+        result["start_offset"] = absolute_footer_start
+        result["start_offset_hex"] = f"0x{absolute_footer_start:X}"
+
+    fields: dict[str, Any] = result["fields"]
+    fields["alpha_blend_enabled"] = _suppressed_byte_field(shifted(0x04, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["alpha_test_enabled"] = _suppressed_byte_field(shifted(0x05, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["mipmaps_enabled"] = _suppressed_byte_field(shifted(0x06, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["animation_enabled"] = _suppressed_byte_field(shifted(0x07, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["scrolling_enabled"] = _suppressed_byte_field(shifted(0x08, version), names=SCROLL_MODE_NAMES, absolute_footer_start=absolute_footer_start)
+    fields["tiled_enabled"] = _suppressed_byte_field(shifted(0x09, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["compress_on_load"] = _suppressed_byte_field(shifted(0x0A, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["distortion_map"] = _suppressed_byte_field(shifted(0x0B, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["game_flags"] = _suppressed_game_flags_obj(shifted(0x0C, version), absolute_footer_start=absolute_footer_start)
+    fields["source_blend_function"] = _suppressed_u32_field(shifted(0x10, version), names=BLEND_FUNCTION_NAMES_SRC, absolute_footer_start=absolute_footer_start)
+    fields["destination_blend_function"] = _suppressed_u32_field(shifted(0x14, version), names=BLEND_FUNCTION_NAMES_DST, absolute_footer_start=absolute_footer_start)
+    fields["alpha_test_compare_function"] = _suppressed_u32_field(shifted(0x18, version), names=ALPHA_TEST_FUNCTION_NAMES, absolute_footer_start=absolute_footer_start)
+    fields["alpha_test_reference"] = _suppressed_byte_field(shifted(0x1C, version), absolute_footer_start=absolute_footer_start)
+    fields["scrolling_type"] = _suppressed_byte_field(shifted(0x1D, version), names=SCROLL_TYPE_NAMES, absolute_footer_start=absolute_footer_start)
+    fields["horizontal_scroll_rate"] = _suppressed_f32_field(shifted(0x21, version), absolute_footer_start=absolute_footer_start)
+    fields["vertical_scroll_rate"] = _suppressed_f32_field(shifted(0x25, version), absolute_footer_start=absolute_footer_start)
+    fields["animation_type"] = _suppressed_byte_field(shifted(0x29, version), names={0: "disabled", 1: "oscillate", 2: "constant"}, absolute_footer_start=absolute_footer_start)
+    fields["animation_delay"] = _suppressed_f32_field(shifted(0x2D, version), absolute_footer_start=absolute_footer_start)
+    fields["mipmap_count"] = _suppressed_byte_field(shifted(0x35, version), absolute_footer_start=absolute_footer_start)
+    fields["subsampling"] = _suppressed_byte_field(shifted(0x39, version), names=SUBSAMPLING_NAMES, absolute_footer_start=absolute_footer_start)
+
+    parsed_surface = parse_surface_id(footer)
+    if parsed_surface is not None:
+        sid, surface_name = parsed_surface
+        surface_off = len(footer) - 4
+        result["surface"] = {
+            "value": sid,
+            "name": surface_name,
+            "raw_hex": footer[surface_off:].hex(" "),
+            "offset": _offset_obj(surface_off, absolute_footer_start),
+            "reported_cautiously": True,
+            "suppressed_from_8bim_trailer": True,
+        }
+
+    if include_walk:
+        result["walk"] = describe_footer_linear(footer, version)
+
+    if include_raw_scans:
+        result["raw_scans"] = {
+            "length_prefixed_rsb_strings": [
+                {"offset": _offset_obj(off, absolute_footer_start), "length": n, "filename": name}
+                for off, n, name in scan_length_prefixed_strings(footer)
+            ],
+            "plain_rsb_strings": [
+                {"offset": off, "offset_hex": f"0x{off:X}", "filename": name}
+                for off, name in scan_plain_rsb_strings(footer, base=(absolute_footer_start or 0))
+            ],
+        }
+
+    return result
+
+def footer_metadata_to_dict(
+    footer: bytes,
+    version: int | None = None,
+    *,
+    absolute_footer_start: int | None = None,
+    include_walk: bool = False,
+    include_raw_scans: bool = False,
+) -> dict[str, Any]:
+    """
+    Return decoded footer metadata as JSON-serialisable dictionaries.
+
+    This is intended for RSBViewer/GUI/tests. It uses the same resolved layout
+    logic as describe_footer_linear(), but returns stable field names instead
+    of human-formatted strings.
+    """
+    shift = footer_layout_shift(version)
+    result: dict[str, Any] = {
+        "size": len(footer),
+        "layout": {
+            "version": version,
+            "shift": shift,
+            "note": "v6/older footer offset adjustment (-1 byte vs v8/v9 canonical offsets)" if shift else None,
+        },
+        "fields": {},
+        "animation_tail": {"detected": False},
+        "damage_surface_tail": {"parsed": False},
+        "surface": None,
+    }
+
+    if absolute_footer_start is not None:
+        result["start_offset"] = absolute_footer_start
+        result["start_offset_hex"] = f"0x{absolute_footer_start:X}"
+
+    if has_early_8bim_marker(footer):
+        return _suppressed_8bim_metadata_to_dict(
+            footer,
+            version,
+            absolute_footer_start=absolute_footer_start,
+            include_walk=include_walk,
+            include_raw_scans=include_raw_scans,
+        )
+
+    fields: dict[str, Any] = result["fields"]
+    fields["alpha_blend_enabled"] = _byte_field(footer, shifted(0x04, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["alpha_test_enabled"] = _byte_field(footer, shifted(0x05, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["mipmaps_enabled"] = _byte_field(footer, shifted(0x06, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["animation_enabled"] = _byte_field(footer, shifted(0x07, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["scrolling_enabled"] = _byte_field(footer, shifted(0x08, version), names=SCROLL_MODE_NAMES, absolute_footer_start=absolute_footer_start)
+    fields["tiled_enabled"] = _byte_field(footer, shifted(0x09, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["compress_on_load"] = _byte_field(footer, shifted(0x0A, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["distortion_map"] = _byte_field(footer, shifted(0x0B, version), enabled=True, absolute_footer_start=absolute_footer_start)
+    fields["game_flags"] = _game_flags_obj(footer, shifted(0x0C, version), absolute_footer_start=absolute_footer_start)
+    fields["source_blend_function"] = _u32_field(footer, shifted(0x10, version), names=BLEND_FUNCTION_NAMES_SRC, absolute_footer_start=absolute_footer_start)
+    fields["destination_blend_function"] = _u32_field(footer, shifted(0x14, version), names=BLEND_FUNCTION_NAMES_DST, absolute_footer_start=absolute_footer_start)
+    fields["alpha_test_compare_function"] = _u32_field(footer, shifted(0x18, version), names=ALPHA_TEST_FUNCTION_NAMES, absolute_footer_start=absolute_footer_start)
+    fields["alpha_test_reference"] = _byte_field(footer, shifted(0x1C, version), absolute_footer_start=absolute_footer_start)
+    fields["scrolling_type"] = _byte_field(footer, shifted(0x1D, version), names=SCROLL_TYPE_NAMES, absolute_footer_start=absolute_footer_start)
+
+    scroll_type = byte_at(footer, shifted(0x1D, version))
+    if SCROLL_TYPE_NAMES.get(scroll_type) == "rotate":
+        fields["rotation_rate"] = _f32_field(footer, shifted(0x21, version), absolute_footer_start=absolute_footer_start)
+        fields["secondary_unused_rate"] = _f32_field(footer, shifted(0x25, version), absolute_footer_start=absolute_footer_start)
+    else:
+        fields["horizontal_scroll_rate"] = _f32_field(footer, shifted(0x21, version), absolute_footer_start=absolute_footer_start)
+        fields["vertical_scroll_rate"] = _f32_field(footer, shifted(0x25, version), absolute_footer_start=absolute_footer_start)
+
+    # Corrected labels: animation type 0 is treated as disabled/none by the UI,
+    # while 1/2 are the observed RSBEditor behaviours.
+    fields["animation_type"] = _byte_field(footer, shifted(0x29, version), names={0: "disabled", 1: "oscillate", 2: "constant"}, absolute_footer_start=absolute_footer_start)
+    fields["animation_delay"] = _f32_field(footer, shifted(0x2D, version), absolute_footer_start=absolute_footer_start)
+
+    anim = parse_animation_tail(footer, version)
+    if anim is not None:
+        result["animation_tail"] = {
+            "detected": True,
+            "start_offset": _offset_obj(anim.start_off, absolute_footer_start),
+            "frame_count": anim.frame_count,
+            "frames": [
+                _frame_obj(idx, len_off, n, name, absolute_footer_start)
+                for idx, (len_off, n, name) in enumerate(anim.frames, 1)
+            ],
+            "mipmap_count": {
+                **_u32_field(footer, anim.mipmap_count_off, absolute_footer_start=absolute_footer_start),
+                "value": anim.mipmap_count,
+            },
+            "subsampling": {
+                **_u32_field(footer, anim.subsampling_off, names=SUBSAMPLING_NAMES, absolute_footer_start=absolute_footer_start),
+                "value": anim.subsampling,
+                "name": SUBSAMPLING_NAMES.get(anim.subsampling, "unknown subsampling value"),
+            },
+            "damage_tail_offset": _offset_obj(anim.damage_tail_off, absolute_footer_start),
+        }
+        damage = parse_damage_surface_tail(footer, anim.damage_tail_off, require_end=False)
+    else:
+        fixed_count_off = shifted(0x35, version)
+        fixed_subsampling_off = shifted(0x39, version)
+        fields["mipmap_count"] = _byte_field(footer, fixed_count_off, absolute_footer_start=absolute_footer_start)
+        fields["subsampling"] = _byte_field(footer, fixed_subsampling_off, names=SUBSAMPLING_NAMES, absolute_footer_start=absolute_footer_start)
+        damage = parse_damage_surface_tail(footer, shifted(0x3D, version), require_end=False)
+
+    result["damage_surface_tail"] = _damage_surface_tail_obj(footer, damage, absolute_footer_start=absolute_footer_start)
+
+    if damage is not None:
+        result["surface"] = result["damage_surface_tail"].get("surface")
+    else:
+        parsed_surface = parse_surface_id(footer)
+        if parsed_surface is not None:
+            sid, surface_name = parsed_surface
+            surface_off = len(footer) - 4
+            result["surface"] = {
+                "value": sid,
+                "name": surface_name,
+                "raw_hex": footer[surface_off:].hex(" "),
+                "offset": _offset_obj(surface_off, absolute_footer_start),
+            }
+
+    if include_walk:
+        result["walk"] = describe_footer_linear(footer, version)
+
+    if include_raw_scans:
+        result["raw_scans"] = {
+            "length_prefixed_rsb_strings": [
+                {"offset": _offset_obj(off, absolute_footer_start), "length": n, "filename": s}
+                for off, n, s in scan_length_prefixed_strings(footer)
+            ],
+            "plain_rsb_strings": [
+                {"offset": off, "offset_hex": f"0x{off:X}", "filename": s}
+                for off, s in scan_plain_rsb_strings(footer, base=(absolute_footer_start or 0))
+            ],
+        }
+
+    return result
 
 
 # Backward-compatible names used by older inspector scripts.

@@ -349,6 +349,14 @@ def _read_footer_metadata_from_trailer(h: RSBHeader, trailer: bytes) -> dict[str
     }
 
 
+def _find_early_8bim_marker(data: bytes, *, search_limit: int = 64) -> int | None:
+    """Return offset of an early Adobe/Photoshop '8BIM' marker in trailer data."""
+    if not data:
+        return None
+    off = data[:max(0, min(len(data), search_limit))].find(b"8BIM")
+    return None if off < 0 else off
+
+
 def split_footer_and_mipmaps(h: RSBHeader, trailer: bytes) -> tuple[bytes, bytes, int, bool | None, str | None, int | None, int | None]:
     """
     Split post-base-image bytes into footer metadata and optional mipmap payloads.
@@ -367,6 +375,23 @@ def split_footer_and_mipmaps(h: RSBHeader, trailer: bytes) -> tuple[bytes, bytes
     mipmap payload bytes off the end of the trailer.
     """
     shift = _footer_layout_shift(h.version)
+
+    # Some official textures, especially plain RGB565 object textures, can have
+    # opaque Photoshop/Adobe resource data after the base image payload. Do not
+    # read ASCII "8BIM" bytes as RSB flags/mipmap metadata. Keep the bytes in
+    # footer/trailer for preservation/inspection, but expose safe defaults.
+    marker_off = _find_early_8bim_marker(trailer)
+    if marker_off is not None:
+        return (
+            trailer,
+            b"",
+            0,
+            False,
+            f"opaque 8BIM/Photoshop trailer @ footer+0x{marker_off:X}; suppressed",
+            0,
+            None,
+        )
+
     mip_enabled = _byte_at(trailer, 0x06 + shift)
     meta = _read_footer_metadata_from_trailer(h, trailer)
     mip_count = meta["mipmap_count"]

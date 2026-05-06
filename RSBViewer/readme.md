@@ -6,6 +6,10 @@ It provides a friendlier visual interface over the same RSB inspection logic use
 
 It can also launch the PNG conversion script from inside the GUI.
 
+
+# UPDATE 06/05/2026:
+ # This README needs updating. The viewer now supports displaying PNGs and saving PNGs to RSBs.
+
 ## What it does
 
 `RSB Viewer` can:
@@ -44,6 +48,9 @@ The following files should be kept in the same directory:
     rsb_viewer.py
     rsb_format.py
     rsb_footer.py
+    rsb_viewer_convert_dialog.py
+    rsb_viewer_scrollable.py
+    rsb_viwer_GUI.py
 
 For PNG conversion from inside the GUI, this file should also be present beside `rsb_viewer.py`:
 
